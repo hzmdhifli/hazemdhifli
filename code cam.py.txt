@@ -1,0 +1,102 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import RPi.GPIO as GPIO
+from picamera2 import Picamera2
+import time
+
+# Initialize MediaPipe Pose.
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose()
+mp_drawing = mp.solutions.drawing_utils
+
+# Initialize PiCamera2
+picam2 = Picamera2()
+config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (640, 480)})
+picam2.configure(config)
+picam2.start()
+
+# Set up the GPIO pins for the servos
+SERVO_PIN_1 = 15  # up
+SERVO_PIN_2 = 14  # down
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(SERVO_PIN_1, GPIO.OUT)
+GPIO.setup(SERVO_PIN_2, GPIO.OUT)
+
+# Set up PWM on the servo pins at 50Hz
+pwm1 = GPIO.PWM(SERVO_PIN_1, 50)
+pwm2 = GPIO.PWM(SERVO_PIN_2, 50)
+pwm1.start(0)
+pwm2.start(0)
+
+def set_servo_angle1(angle):
+    duty = angle / 18 + 2
+    GPIO.output(SERVO_PIN_1, True)
+    pwm1.ChangeDutyCycle(duty)
+    time.sleep(0.2)
+    GPIO.output(SERVO_PIN_1, False)
+    pwm1.ChangeDutyCycle(0)
+
+def set_servo_angle2(angle):
+    duty = angle / 18 + 2
+    GPIO.output(SERVO_PIN_2, True)
+    pwm2.ChangeDutyCycle(duty)
+    time.sleep(0.2)
+    GPIO.output(SERVO_PIN_2, False)
+    pwm2.ChangeDutyCycle(0)
+
+def compute_median(landmarks):
+    visible_landmarks = [lm for lm in landmarks if lm.visibility > 0.5]
+    if not visible_landmarks:
+        return None, None
+    x_coords = [lm.x for lm in visible_landmarks]
+    y_coords = [lm.y for lm in visible_landmarks]
+    x_median = np.median(x_coords)
+    y_median = np.median(y_coords)
+    return x_median, y_median
+
+try:
+    xacc = 1000
+    yacc = 1000
+    while True:
+        frame = picam2.capture_array()
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(image)
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+        if results.pose_landmarks:
+            mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+            landmarks = results.pose_landmarks.landmark
+            x_median, y_median = compute_median(landmarks)
+
+            if x_median is not None and y_median is not None:
+                h, w, _ = image.shape
+                x_pixel = int(x_median * w)
+                y_pixel = int(y_median * h)
+                
+                # Calculate screen center
+                center_x = w // 2
+                center_y = h // 2
+
+                # Draw median point and center of the screen
+                cv2.circle(image, (x_pixel, y_pixel), 5, (0, 0, 255), -1)
+                cv2.circle(image, (center_x, center_y), 5, (255, 0, 0), -1)
+                cv2.putText(image, 'Human Point', (x_pixel + 10, y_pixel), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                cv2.putText(image, 'Center Point', (center_x + 10, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+                if abs(xacc - (x_pixel - center_x)) > 25 or abs(yacc - (y_pixel - center_y)) > 25:
+                    xacc = x_pixel - center_x
+                    yacc = y_pixel - center_y
+                    set_servo_angle1(30 + yacc * 0.1)
+                    set_servo_angle2(120 + xacc * 0.2)
+
+        # Display the output
+        cv2.imshow('Pose Estimation', image)
+        if cv2.waitKey(5) & 0xFF == 27:  # ESC key to exit
+            break
+finally:
+    cv2.destroyAllWindows()
+    picam2.close()
+    pwm1.stop()
+    pwm2.stop()
+    GPIO.cleanup()
